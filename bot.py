@@ -1,26 +1,35 @@
 import sqlite3
 import pandas as pd
 from datetime import datetime
-from telegram import Update
+from telegram import (
+    Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    ConversationHandler, ContextTypes, filters
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ConversationHandler,
+    ContextTypes,
+    CallbackQueryHandler,
+    filters
 )
 import os
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-# Stati conversazione
-PROGETTO, ORE, DESC = range(3)
+SELECT_PROJECT, HOURS, DESC = range(3)
 
-# Database
-conn = sqlite3.connect("timesheet.db", check_same_thread=False)
+# DATABASE
+conn = sqlite3.connect("data.db", check_same_thread=False)
 c = conn.cursor()
 
 c.execute("""
 CREATE TABLE IF NOT EXISTS users(
 id INTEGER PRIMARY KEY,
-username TEXT
+name TEXT,
+role TEXT
 )
 """)
 
@@ -44,11 +53,17 @@ description TEXT
 
 conn.commit()
 
-# ---------- UTIL ----------
 
-def is_user_allowed(user_id):
+# ---------------- UTILITY ----------------
+
+def get_user(user_id):
     res = c.execute("SELECT * FROM users WHERE id=?", (user_id,))
-    return res.fetchone() is not None
+    return res.fetchone()
+
+
+def is_admin(user_id):
+    user = get_user(user_id)
+    return user and user[2] == "admin"
 
 
 def get_projects():
@@ -56,109 +71,126 @@ def get_projects():
     return [r[0] for r in res.fetchall()]
 
 
-# ---------- COMANDI ----------
+# ---------------- START ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
 
-    if not is_user_allowed(user.id):
+    user = get_user(update.message.from_user.id)
+
+    if not user:
         await update.message.reply_text(
-            f"Utente non autorizzato.\nInvia questo ID all'amministratore:\n{user.id}"
+            "Non sei autorizzato.\nInvia il tuo ID all'amministratore:\n"
+            f"{update.message.from_user.id}"
         )
         return
 
-    await update.message.reply_text(
-        "Bot Timesheet\n\n"
-        "/ore inserisci ore\n"
-        "/progetti lista progetti\n"
-        "/report mese\n"
-        "/export export csv"
-    )
+    text = "Timesheet Bot\n\n"
+
+    text += "/ore inserisci ore\n"
+    text += "/projects lista progetti\n"
+    text += "/report report mese\n"
+    text += "/export export csv\n"
+
+    if user[2] == "admin":
+        text += "\nComandi admin:\n"
+        text += "/adduser id nome ruolo\n"
+        text += "/addproject nome\n"
+
+    await update.message.reply_text(text)
 
 
-# ---------- GESTIONE UTENTI ----------
+# ---------------- USER ----------------
 
-async def add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if len(context.args) < 2:
-        await update.message.reply_text("/adduser USERID username")
+    if not is_admin(update.message.from_user.id):
         return
 
-    user_id = int(context.args[0])
-    username = context.args[1]
+    try:
+        user_id = int(context.args[0])
+        name = context.args[1]
+        role = context.args[2]
+    except:
+        await update.message.reply_text(
+            "/adduser ID nome ruolo(admin/user)"
+        )
+        return
 
     c.execute(
-        "INSERT OR IGNORE INTO users VALUES (?,?)",
-        (user_id, username)
+        "INSERT OR REPLACE INTO users VALUES(?,?,?)",
+        (user_id, name, role)
     )
+
     conn.commit()
 
-    await update.message.reply_text("Utente aggiunto")
+    await update.message.reply_text("Utente salvato")
 
 
-# ---------- PROGETTI ----------
+# ---------------- PROJECTS ----------------
 
-async def add_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def addproject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not is_admin(update.message.from_user.id):
+        return
 
     name = " ".join(context.args)
 
     c.execute(
-        "INSERT INTO projects(name) VALUES (?)",
+        "INSERT INTO projects(name) VALUES(?)",
         (name,)
     )
+
     conn.commit()
 
     await update.message.reply_text("Progetto aggiunto")
 
 
-async def list_projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     projects = get_projects()
-
-    if not projects:
-        await update.message.reply_text("Nessun progetto")
-        return
 
     text = "Progetti:\n"
+
     for p in projects:
         text += f"- {p}\n"
 
     await update.message.reply_text(text)
 
 
-# ---------- INSERIMENTO ORE ----------
+# ---------------- ORE ----------------
 
-async def ore_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not is_user_allowed(update.message.from_user.id):
-        await update.message.reply_text("Non autorizzato")
-        return ConversationHandler.END
+async def ore(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     projects = get_projects()
 
-    if not projects:
-        await update.message.reply_text("Nessun progetto configurato")
-        return ConversationHandler.END
+    keyboard = []
 
-    text = "Seleziona progetto:\n"
     for p in projects:
-        text += f"- {p}\n"
+        keyboard.append(
+            [InlineKeyboardButton(p, callback_data=p)]
+        )
 
-    await update.message.reply_text(text)
+    await update.message.reply_text(
+        "Seleziona progetto",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-    return PROGETTO
-
-
-async def progetto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    context.user_data["project"] = update.message.text
-
-    await update.message.reply_text("Quante ore?")
-
-    return ORE
+    return SELECT_PROJECT
 
 
-async def ore(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def project_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    context.user_data["project"] = query.data
+
+    await query.edit_message_text("Quante ore?")
+
+    return HOURS
+
+
+async def hours(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["hours"] = update.message.text
 
@@ -176,43 +208,55 @@ async def desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     date = datetime.now().strftime("%Y-%m-%d")
 
     c.execute(
-        "INSERT INTO hours(date,user,project,hours,description) VALUES (?,?,?,?,?)",
+        "INSERT INTO hours(date,user,project,hours,description) VALUES(?,?,?,?,?)",
         (date, user, project, hours, description)
     )
+
     conn.commit()
 
-    await update.message.reply_text("Ore registrate!")
+    await update.message.reply_text("Ore registrate")
 
     return ConversationHandler.END
 
 
-# ---------- REPORT ----------
+# ---------------- REPORT ----------------
 
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    month = datetime.now().strftime("%Y-%m")
+    if context.args:
+        month = context.args[0]
+    else:
+        month = datetime.now().strftime("%Y-%m")
 
     df = pd.read_sql_query("SELECT * FROM hours", conn)
 
     df = df[df["date"].str.startswith(month)]
 
-    report = df.groupby("project")["hours"].sum()
+    proj = df.groupby("project")["hours"].sum()
+    user = df.groupby("user")["hours"].sum()
 
     text = f"Report {month}\n\n"
 
-    for p, h in report.items():
-        text += f"{p}: {h} ore\n"
+    text += "Per progetto\n"
+
+    for p, h in proj.items():
+        text += f"{p}: {h}\n"
+
+    text += "\nPer utente\n"
+
+    for u, h in user.items():
+        text += f"{u}: {h}\n"
 
     await update.message.reply_text(text)
 
 
-# ---------- EXPORT CSV ----------
+# ---------------- EXPORT ----------------
 
 async def export(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     df = pd.read_sql_query("SELECT * FROM hours", conn)
 
-    if len(context.args) > 0:
+    if context.args:
         project = " ".join(context.args)
         df = df[df["project"] == project]
 
@@ -223,26 +267,47 @@ async def export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_document(open(file, "rb"))
 
 
-# ---------- BOT ----------
+async def export_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    df = pd.read_sql_query("SELECT * FROM hours", conn)
+
+    file = "export.xlsx"
+
+    df.to_excel(file, index=False)
+
+    await update.message.reply_document(open(file, "rb"))
+
+
+# ---------------- BACKUP ----------------
+
+async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    await update.message.reply_document(open("data.db", "rb"))
+
+
+# ---------------- BOT ----------------
 
 app = ApplicationBuilder().token(TOKEN).build()
 
 conv = ConversationHandler(
-    entry_points=[CommandHandler("ore", ore_start)],
+    entry_points=[CommandHandler("ore", ore)],
     states={
-        PROGETTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, progetto)],
-        ORE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ore)],
-        DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, desc)],
+        SELECT_PROJECT: [CallbackQueryHandler(project_selected)],
+        HOURS: [MessageHandler(filters.TEXT, hours)],
+        DESC: [MessageHandler(filters.TEXT, desc)],
     },
     fallbacks=[]
 )
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("adduser", add_user))
-app.add_handler(CommandHandler("addproject", add_project))
-app.add_handler(CommandHandler("progetti", list_projects))
+app.add_handler(CommandHandler("adduser", adduser))
+app.add_handler(CommandHandler("addproject", addproject))
+app.add_handler(CommandHandler("projects", projects))
 app.add_handler(CommandHandler("report", report))
 app.add_handler(CommandHandler("export", export))
+app.add_handler(CommandHandler("exportexcel", export_excel))
+app.add_handler(CommandHandler("backup", backup))
+
 app.add_handler(conv)
 
 print("Bot avviato")
