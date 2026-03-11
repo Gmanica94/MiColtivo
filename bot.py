@@ -8,7 +8,7 @@ from telegram.ext import (
 )
 import os
 
-TOKEN = os.getenv("TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")
 
 # Stati conversazione
 PROGETTO, ORE, DESC = range(3)
@@ -248,5 +248,3 @@ app.add_handler(conv)
 print("Bot avviato")
 
 app.run_polling()
-
-
