@@ -3,32 +3,19 @@ import pandas as pd
 from datetime import datetime
 import os
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
-
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
-    ConversationHandler,
     ContextTypes,
     filters
 )
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-(
-SELECT_PROJECT,
-INSERT_HOURS,
-INSERT_DESC,
-INSERT_DATE
-) = range(4)
-
-# DATABASE
+# -------- DATABASE --------
 
 conn = sqlite3.connect("data.db", check_same_thread=False)
 c = conn.cursor()
@@ -53,7 +40,11 @@ description TEXT
 
 conn.commit()
 
-# MENU
+# -------- USER STATE --------
+
+user_state = {}
+
+# -------- MENU --------
 
 def main_menu():
 
@@ -75,7 +66,7 @@ def main_menu():
 
     return InlineKeyboardMarkup(keyboard)
 
-# START
+# -------- START --------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -87,7 +78,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     )
 
-# MENU
+# -------- MENU --------
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -97,6 +88,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     action = query.data
 
+    user = query.from_user.id
+
     if action == "insert":
 
         projects = c.execute(
@@ -105,27 +98,13 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         ).fetchall()
 
-        if not projects:
-
-            await query.edit_message_text(
-
-                "Nessun progetto configurato.\n"
-
-                "Aggiungi con:\n"
-
-                "/addproject nome"
-
-            )
-
-            return
-
         keyboard = []
 
         for p in projects:
 
             keyboard.append(
 
-                [InlineKeyboardButton(p[0], callback_data=p[0])]
+                [InlineKeyboardButton(p[0], callback_data=f"project_{p[0]}")]
 
             )
 
@@ -137,99 +116,131 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         )
 
-        return SELECT_PROJECT
-
-    if action == "report":
+    elif action == "report":
 
         await report(query)
 
-    if action == "export":
+    elif action == "export":
 
         await export_csv(query)
 
-    if action == "excel":
+    elif action == "excel":
 
         await export_excel(query)
 
-    if action == "edit":
+    elif action == "edit":
 
         await list_hours(query)
 
-    if action == "delete":
+    elif action == "delete":
 
         await delete_hours(query)
 
-# INSERIMENTO
+# -------- PROJECT SELECT --------
 
-async def select_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def project_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
 
     await query.answer()
 
-    context.user_data["project"] = query.data
+    project = query.data.replace("project_", "")
 
-    await query.edit_message_text("Quante ore?")
+    user = query.from_user.id
 
-    return INSERT_HOURS
+    user_state[user] = {
 
-async def insert_hours(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        "step": "hours",
 
-    context.user_data["hours"] = update.message.text
+        "project": project
 
-    await update.message.reply_text("Descrizione attività")
+    }
 
-    return INSERT_DESC
+    await query.edit_message_text(
 
-async def insert_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        f"Progetto: {project}\n\n"
 
-    context.user_data["desc"] = update.message.text
-
-    await update.message.reply_text(
-
-        "Data attività (YYYY-MM-DD) oppure scrivi 'oggi'"
+        "Quante ore?"
 
     )
 
-    return INSERT_DATE
+# -------- TEXT INPUT --------
 
-async def insert_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    date = update.message.text
+    user = update.effective_user.id
 
-    if date == "oggi":
+    if user not in user_state:
 
-        date = datetime.now().strftime("%Y-%m-%d")
+        return
 
-    user = update.effective_user.username
+    state = user_state[user]["step"]
 
-    project = context.user_data["project"]
+    text = update.message.text
 
-    hours = context.user_data["hours"]
+    if state == "hours":
 
-    desc = context.user_data["desc"]
+        user_state[user]["hours"] = text
 
-    c.execute(
+        user_state[user]["step"] = "desc"
 
-        "INSERT INTO hours(date,user,project,hours,description) VALUES(?,?,?,?,?)",
+        await update.message.reply_text(
 
-        (date, user, project, hours, desc)
+            "Descrizione attività"
 
-    )
+        )
 
-    conn.commit()
+    elif state == "desc":
 
-    await update.message.reply_text(
+        user_state[user]["desc"] = text
 
-        "Ore salvate",
+        user_state[user]["step"] = "date"
 
-        reply_markup=main_menu()
+        await update.message.reply_text(
 
-    )
+            "Data attività (YYYY-MM-DD) oppure scrivi 'oggi'"
 
-    return ConversationHandler.END
+        )
 
-# REPORT
+    elif state == "date":
+
+        if text == "oggi":
+
+            date = datetime.now().strftime("%Y-%m-%d")
+
+        else:
+
+            date = text
+
+        project = user_state[user]["project"]
+
+        hours = user_state[user]["hours"]
+
+        desc = user_state[user]["desc"]
+
+        username = update.effective_user.username
+
+        c.execute(
+
+            "INSERT INTO hours(date,user,project,hours,description) VALUES(?,?,?,?,?)",
+
+            (date, username, project, hours, desc)
+
+        )
+
+        conn.commit()
+
+        user_state.pop(user)
+
+        await update.message.reply_text(
+
+            "Ore salvate",
+
+            reply_markup=main_menu()
+
+        )
+
+# -------- REPORT --------
 
 async def report(query):
 
@@ -271,7 +282,7 @@ async def report(query):
 
     )
 
-# EXPORT
+# -------- EXPORT --------
 
 async def export_csv(query):
 
@@ -313,7 +324,7 @@ async def export_excel(query):
 
     )
 
-# MODIFICA / ELIMINA
+# -------- EDIT / DELETE --------
 
 async def list_hours(query):
 
@@ -371,7 +382,7 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     )
 
-# PROGETTI
+# -------- PROJECT --------
 
 async def add_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -387,31 +398,15 @@ async def add_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn.commit()
 
-    await update.message.reply_text("Progetto aggiunto")
+    await update.message.reply_text(
 
-# BOT
+        "Progetto aggiunto"
+
+    )
+
+# -------- BOT --------
 
 app = ApplicationBuilder().token(TOKEN).build()
-
-conv = ConversationHandler(
-
-    entry_points=[CallbackQueryHandler(menu, pattern="insert")],
-
-    states={
-
-        SELECT_PROJECT: [CallbackQueryHandler(select_project)],
-
-        INSERT_HOURS: [MessageHandler(filters.TEXT, insert_hours)],
-
-        INSERT_DESC: [MessageHandler(filters.TEXT, insert_desc)],
-
-        INSERT_DATE: [MessageHandler(filters.TEXT, insert_date)]
-
-    },
-
-    fallbacks=[]
-
-)
 
 app.add_handler(CommandHandler("start", start))
 
@@ -419,9 +414,11 @@ app.add_handler(CommandHandler("addproject", add_project))
 
 app.add_handler(MessageHandler(filters.Regex(r"^/del_"), delete_command))
 
-app.add_handler(conv)
+app.add_handler(CallbackQueryHandler(project_select, pattern="project_"))
 
 app.add_handler(CallbackQueryHandler(menu))
+
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
 print("BOT AVVIATO")
 
